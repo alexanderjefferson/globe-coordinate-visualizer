@@ -6,7 +6,7 @@ An interactive 3D globe that helps users visualize how cities around the world a
 
 Latitude & Longitude Explorer was created to address a common misconception about global geography. While maps often make it difficult to visualize geographic relationships across continents, many cities separated by thousands of miles share the same latitude or longitude.
 
-The project was inspired by a realization in Yasunari Kawabata's *Snow Country*, which notes that New York, Spanish Morocco, and Japan all lie along nearly the same latitude. This observation highlights how traditional map projections can obscure geographic relationships that become immediately apparent on a globe.
+The project was inspired by a realization in Yasunari Kawabata's *Snow Country*, which notes that New York, Barcelona, and Northerno Japan all lie along nearly the same latitude. This observation highlights how traditional map projections can obscure geographic relationships that become immediately apparent on a globe.
 
 Using an interactive 3D Earth model, users can explore latitude and longitude lines, discover cities that align with specific coordinates, and develop a stronger intuition for global geography.
 
