@@ -121,7 +121,7 @@ let activeLon  = 0;       // independently stored
 let lastCity   = null;    // last city selected (for mode switch auto-snap)
 
 const GLOBE_R  = 1.0;
-const LINE_R   = 1.008;   // slightly above surface to avoid z-fighting
+const LINE_R   = 1.015;   // slightly above surface to avoid z-fighting
 const TOLERANCE = 1.5;    // degrees tolerance for city highlighting
 const SEG       = 256;    // ring segments
 
@@ -160,17 +160,27 @@ controls.enablePan      = false;
 controls.autoRotate     = true;
 controls.autoRotateSpeed = 0.3;
 
-// ── TEXTURES & MESHES (exactly as uploaded) ──
+// ── TEXTURES & MESHES ──
 const loader   = new THREE.TextureLoader();
 const geometry = new THREE.IcosahedronGeometry(GLOBE_R, 14);
 
+// DEPTH OCCLUDER — invisible sphere slightly smaller than globe.
+// Renders first (renderOrder=-1), writes only to depth buffer.
+// This fills the depth buffer for the entire globe volume so that
+// lines behind the earth fail depthTest regardless of tilt angle.
+const occluderMat = new THREE.MeshBasicMaterial({
+  colorWrite: false,   // invisible — writes depth only
+  side: THREE.FrontSide,
+});
+const occluder = new THREE.Mesh(new THREE.IcosahedronGeometry(GLOBE_R * 0.998, 14), occluderMat);
+occluder.renderOrder = -1;
+earthGroup.add(occluder);
+
 const material = new THREE.MeshPhongMaterial({
   map: loader.load("./images/earthmap.jpg"),
-  polygonOffset: true,
-  polygonOffsetFactor: 1,
-  polygonOffsetUnits: 1,
 });
 const earthMesh = new THREE.Mesh(geometry, material);
+earthMesh.renderOrder = 0;
 earthGroup.add(earthMesh);
 
 const cloudsMat = new THREE.MeshStandardMaterial({
@@ -181,11 +191,13 @@ const cloudsMat = new THREE.MeshStandardMaterial({
 });
 const cloudsMesh = new THREE.Mesh(geometry, cloudsMat);
 cloudsMesh.scale.setScalar(1.003);
+cloudsMesh.renderOrder = 0;
 earthGroup.add(cloudsMesh);
 
 const fresnelMat = getFresnelMat();
 const glowMesh   = new THREE.Mesh(geometry, fresnelMat);
 glowMesh.scale.setScalar(1.01);
+glowMesh.renderOrder = 0;
 earthGroup.add(glowMesh);
 
 // ── LIGHTING (exactly as uploaded) ──
@@ -200,16 +212,21 @@ scene.add(stars);
 
 // ════════════════════════════════════════════════════════════════
 //  COORDINATE CONVERSION
-//  The earthmap.jpg texture (from the original repo) maps Greenwich
-//  (lon=0) toward the +Z axis — which is where the camera starts.
-//  Standard spherical: x = sin(φ)cos(θ), z = sin(φ)sin(θ)
-//  We need lon=0 → θ=90° (so that z = sin(φ)sin(90°) = sin(φ) = +Z)
-//  And increasing lon goes WEST in the texture, so we negate.
-//  Therefore: θ = π/2 - lon * π/180
+//  Three.js IcosahedronGeometry UV uses atan2(x, -z) for the u coord.
+//  This means:
+//    lon=0   (Greenwich) → facing -Z  (theta = -PI/2)
+//    lon=90E             → facing -X  (theta = -PI)
+//    lon=180 (Pacific)   → facing +Z  (theta = +PI/2)  ← toward camera
+//  Formula: theta = -PI/2 - lon * PI/180
 // ════════════════════════════════════════════════════════════════
+// LON_OFFSET calibrated empirically: prime meridian appeared at Madison WI (-89.4°)
+// offset correction = +89.4° → new offset = -90° + 89.4° ≈ 0
+const LON_OFFSET = Math.PI + (0.15 * Math.PI / 180);
+
+
 function latLonToVec3(lat, lon, r) {
   const phi   = (90 - lat) * (Math.PI / 180);
-  const theta = Math.PI / 2 - lon * (Math.PI / 180);
+  const theta = LON_OFFSET - lon * (Math.PI / 180);
   return new THREE.Vector3(
      r * Math.sin(phi) * Math.cos(theta),
      r * Math.cos(phi),
@@ -219,29 +236,28 @@ function latLonToVec3(lat, lon, r) {
 
 // ════════════════════════════════════════════════════════════════
 //  LINE BUILDERS
-//  Lines are children of earthGroup so they tilt with the earth.
 // ════════════════════════════════════════════════════════════════
 function makeLatLine(lat, color, opacity) {
   const pts = [];
   const phi = (90 - lat) * (Math.PI / 180);
   const rr  = LINE_R * Math.sin(phi);
   const yy  = LINE_R * Math.cos(phi);
-  // Full circle — latitude parallels wrap all the way round
   for (let i = 0; i <= SEG; i++) {
     const t = (i / SEG) * Math.PI * 2;
     pts.push(new THREE.Vector3(rr * Math.cos(t), yy, rr * Math.sin(t)));
   }
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
-  // depthTest ON — lines only show on the front-facing side of the globe
   const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false, depthTest: true });
-  return new THREE.Line(geo, mat);
+  const line = new THREE.Line(geo, mat);
+  line.renderOrder = 1;
+  return line;
 }
 
 function makeLonLine(lon, color, opacity) {
   const pts    = [];
-  const theta0 = Math.PI / 2 - lon * (Math.PI / 180);
+  const theta0 = LON_OFFSET - lon * (Math.PI / 180);
   for (let i = 0; i <= SEG; i++) {
-    const t = (i / SEG) * Math.PI * 2;
+    const t = (i / SEG) * Math.PI;   // semicircle: north pole → south pole only
     pts.push(new THREE.Vector3(
        LINE_R * Math.sin(t) * Math.cos(theta0),
        LINE_R * Math.cos(t),
@@ -250,31 +266,33 @@ function makeLonLine(lon, color, opacity) {
   }
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false, depthTest: true });
-  return new THREE.Line(geo, mat);
+  const line = new THREE.Line(geo, mat);
+  line.renderOrder = 1;
+  return line;
 }
 
 // ════════════════════════════════════════════════════════════════
-//  REFERENCE LINES — added to earthGroup, tilt with planet
+//  REFERENCE LINES
 // ════════════════════════════════════════════════════════════════
-// Equator — amber, visible but not dominant
+// Equator 
 earthGroup.add(makeLatLine(0, 0xd97706, 0.5));
 
-// Prime meridian — blue, visible but not dominant
-earthGroup.add(makeLonLine(0, 0x3b82f6, 0.5));
+// Prime meridian
+earthGroup.add(makeLonLine(0, 0xd97706, 0.5));
 
-// Tropics + arctic circles — very subtle
+// Tropics + arctic circles
 [23.43, -23.43, 66.56, -66.56].forEach(lat => {
   earthGroup.add(makeLatLine(lat, 0x1e3a5f, 0.25));
 });
 
 // ════════════════════════════════════════════════════════════════
-//  ACTIVE LINE — rebuilt on every degree change
+//  ACTIVE LINE
 // ════════════════════════════════════════════════════════════════
-let activeLatLine = null;  // latitude ring (always present)
-let activeLonLine = null;  // longitude ring (always present)
+let activeLatLine = null;  // latitude ring
+let activeLonLine = null;  // longitude ring
 
 function rebuildActiveLines() {
-  // Remove old
+  
   if (activeLatLine) { earthGroup.remove(activeLatLine); disposeObj(activeLatLine); }
   if (activeLonLine) { earthGroup.remove(activeLonLine); disposeObj(activeLonLine); }
 
@@ -311,9 +329,9 @@ function buildGlowLine(isLat, deg, isActive) {
         haloPts.push(new THREE.Vector3(rr * Math.cos(t), yy, rr * Math.sin(t)));
       }
     } else {
-      const theta0 = Math.PI / 2 - deg * (Math.PI / 180);
+      const theta0 = LON_OFFSET - deg * (Math.PI / 180);
       for (let i = 0; i <= SEG; i++) {
-        const t = (i / SEG) * Math.PI * 2;
+        const t = (i / SEG) * Math.PI;   // semicircle only
         haloPts.push(new THREE.Vector3(
            haloR * Math.sin(t) * Math.cos(theta0),
            haloR * Math.cos(t),
@@ -326,7 +344,9 @@ function buildGlowLine(isLat, deg, isActive) {
       color: 0x63e4cf, transparent: true, opacity: 0.35,
       depthWrite: false, depthTest: true,
     });
-    group.add(new THREE.Line(haloGeo, haloMat));
+    const haloLine = new THREE.Line(haloGeo, haloMat);
+    haloLine.renderOrder = 1;
+    group.add(haloLine);
   }
 
   return group;
@@ -340,22 +360,26 @@ function disposeObj(obj) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  CITY MARKERS — children of earthGroup (tilt with planet)
+//  CITY MARKERS
 // ════════════════════════════════════════════════════════════════
 const dotGeo  = new THREE.SphereGeometry(0.007, 7, 7);
 const glowGeo = new THREE.SphereGeometry(0.013, 7, 7);
 const markers = [];
 
+const dotMatBase = { depthWrite: false, depthTest: true };
+
 CITIES.forEach(city => {
   const pos = latLonToVec3(city.lat, city.lon, GLOBE_R * 1.008);
 
-  const dot = new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color: 0x475569 }));
+  const dot = new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color: 0x475569, ...dotMatBase }));
   dot.position.copy(pos);
   dot.userData.city = city;
+  dot.renderOrder = 1;
   earthGroup.add(dot);
 
-  const glow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color: 0x63e4cf, transparent: true, opacity: 0, depthWrite: false }));
+  const glow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color: 0x63e4cf, transparent: true, opacity: 0, ...dotMatBase }));
   glow.position.copy(pos);
+  glow.renderOrder = 1;
   earthGroup.add(glow);
 
   markers.push({ dot, glow, city });
@@ -401,9 +425,14 @@ function refreshMarkers() {
 // ════════════════════════════════════════════════════════════════
 function fmtDeg(deg, isLat) {
   const a = Math.abs(deg).toFixed(1);
-  return isLat
-    ? (deg >= 0 ? `${a}° N` : `${a}° S`)
-    : (deg >= 0 ? `${a}° E` : `${a}° W`);
+  if (isLat) {
+    if (Math.abs(deg) < 0.05) return `0.0°`;
+    return deg > 0 ? `${a}° N` : `${a}° S`;
+  } else {
+    if (Math.abs(deg) < 0.05)          return `0.0°`;
+    if (Math.abs(Math.abs(deg) - 180) < 0.05) return `180.0°`;
+    return deg > 0 ? `${a}° E` : `${a}° W`;
+  }
 }
 
 function lineName(deg, isLat) {
@@ -552,8 +581,6 @@ cityIn.addEventListener("input", () => {
   dropdown.style.display = "block";
 });
 
-// Use pointerdown on the dropdown itself — fires before input blur,
-// and preventDefault stops the input from losing focus
 dropdown.addEventListener("pointerdown", e => {
   e.preventDefault();
   const item = e.target.closest(".drop-item");
@@ -613,7 +640,6 @@ function flyTo(lat, lon) {
 // ════════════════════════════════════════════════════════════════
 //  GLOBE LINE DRAG
 //  Raycasting against a sphere that matches earthGroup.
-//  We un-apply the group's Z tilt to get local coords.
 // ════════════════════════════════════════════════════════════════
 const raycaster  = new THREE.Raycaster();
 const mousePt    = new THREE.Vector2();
@@ -621,7 +647,7 @@ let   dragging   = false;
 let   didDrag    = false;   // true if we actually moved while dragging (suppresses click)
 let   hintGone   = false;
 
-// Invisible pick sphere — added to earthGroup so it tilts with it
+// Invisible pick sphere
 const pickSphere = new THREE.Mesh(
   new THREE.SphereGeometry(GLOBE_R * 1.01, 32, 32),
   new THREE.MeshBasicMaterial({ visible: false, side: THREE.FrontSide })
@@ -641,12 +667,13 @@ function getLocalHit(event) {
 }
 
 function localVecToLatLon(v) {
-  const r   = v.length();
-  const lat = Math.asin(v.y / r) * (180 / Math.PI);
-  // theta = PI/2 - lon*PI/180  →  lon = (PI/2 - theta) * 180/PI
+  const r     = v.length();
+  const lat   = Math.asin(Math.max(-1, Math.min(1, v.y / r))) * (180 / Math.PI);
+  // theta = LON_OFFSET - lon*PI/180  →  lon = (LON_OFFSET - theta) * 180/PI
   const theta = Math.atan2(v.z, v.x);
-  const lon   = (Math.PI / 2 - theta) * (180 / Math.PI);
-  return { lat, lon: ((lon + 180) % 360) - 180 };
+  const lon   = (LON_OFFSET - theta) * (180 / Math.PI);
+  // Normalise to [-180, 180]
+  return { lat, lon: ((lon + 180 + 360) % 360) - 180 };
 }
 
 function nearActiveLine(local) {
@@ -738,7 +765,7 @@ window.addEventListener("resize", () => {
 function animate() {
   requestAnimationFrame(animate);
 
-  cloudsMesh.rotation.y += 0.0008; // match uploaded file exactly
+  cloudsMesh.rotation.y += 0.0008;
   stars.rotation.y      -= 0.0002;
 
   // Smooth camera fly-to
@@ -748,6 +775,8 @@ function animate() {
   }
 
   controls.update();
+  // Clear stencil before render so earth re-stamps stencil=1 each frame
+  renderer.clearStencil();
   renderer.render(scene, camera);
 }
 
